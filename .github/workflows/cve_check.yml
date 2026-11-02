@@ -1,0 +1,29 @@
+name: Multi-Source CVE Security Alerter
+
+on:
+  schedule:
+    - cron: '0 * * * *' # 每小時自動運行一次檢查
+  workflow_dispatch: # 允許你隨時手動點擊按鈕測試
+
+jobs:
+  run-alerter:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Execute CVE Checker
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+        run: python cve_alerter.py
