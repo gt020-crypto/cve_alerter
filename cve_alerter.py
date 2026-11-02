@@ -22,13 +22,17 @@ def check_nvd():
         if res.status_code == 200:
             data = res.json()
             now = datetime.now(timezone.utc)
-            cutoff = now - timedelta(hours=3) # 檢查近3小時內發布
+            cutoff = now - timedelta(hours=6) # 檢查近6小時內發布
             for item in data.get("vulnerabilities", []):
                 cve = item.get("cve", {})
                 cve_id = cve.get("id")
                 published = cve.get("published")
                 if published:
                     pub_date = datetime.fromisoformat(published.replace("Z", "+00:00"))
+                    # 確保兩者皆具備時區屬性 (Timezone-aware)
+                    if pub_date.tzinfo is None:
+                        pub_date = pub_date.replace(tzinfo=timezone.utc)
+                        
                     if pub_date >= cutoff:
                         metrics = cve.get("metrics", {})
                         score = "N/A"
@@ -39,7 +43,7 @@ def check_nvd():
                         if isinstance(score, (int, float)) and score >= 9.0:
                             desc = cve.get("descriptions", [{}])[0].get("value", "No description")
                             vulns.append({
-                                "source": "NIST NVD (CVSS 9+)",
+                                "source": "NIST NVD",
                                 "id": cve_id,
                                 "score": score,
                                 "desc": desc[:300] + "...",
@@ -50,110 +54,11 @@ def check_nvd():
     return vulns
 
 def check_cisa_kev():
-    """2. 查詢 CISA KEV (美國網絡安全局公布：已遭實際利用的重大漏洞)"""
+    """2. 查詢 CISA KEV (已遭實際利用的重大漏洞)"""
     url = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
     vulns = []
     try:
         res = requests.get(url, timeout=15)
         if res.status_code == 200:
             data = res.json()
-            now = datetime.now(timezone.utc)
-            cutoff = now - timedelta(days=1) # 檢查最近一天被加入KEV清單嘅項目
-            for item in data.get("vulnerabilities", []):
-                date_added = item.get("dateAdded")
-                if date_added:
-                    added_date = datetime.strptime(date_added, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                    if added_date >= cutoff:
-                        cve_id = item.get("cveID")
-                        vuln_name = item.get("vulnerabilityName")
-                        desc = item.get("shortDescription", "Active exploit reported by CISA KEV.")
-                        vulns.append({
-                            "source": "CISA KEV (Active Exploit)",
-                            "id": cve_id,
-                            "score": "Critical (Exploited)",
-                            "desc": f"{vuln_name}: {desc}"[:300] + "...",
-                            "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}"
-                        })
-    except Exception as e:
-        print(f"CISA KEV Error: {e}")
-    return vulns
-
-def check_github_advisories():
-    """3. 查詢 GitHub Security Advisories 官方高危開源組件漏洞"""
-    url = "https://api.github.com/advisories?severity=critical&per_page=10"
-    vulns = []
-    try:
-        headers = {"Accept": "application/vnd.github+json"}
-        res = requests.get(url, headers=headers, timeout=15)
-        if res.status_code == 200:
-            items = res.json()
-            now = datetime.now(timezone.utc)
-            cutoff = now - timedelta(hours=3)
-            for item in items:
-                published = item.get("published_at")
-                if published:
-                    pub_date = datetime.fromisoformat(published.replace("Z", "+00:00"))
-                    if pub_date >= cutoff:
-                        ghsa_id = item.get("ghsa_id")
-                        summary = item.get("summary", "No summary")
-                        cve_id = item.get("cve_id") or ghsa_id
-                        vulns.append({
-                            "source": "GitHub Advisories",
-                            "id": cve_id,
-                            "score": "Critical (GitHub)",
-                            "desc": summary[:300] + "...",
-                            "url": item.get("html_url", f"https://github.com/advisories/{ghsa_id}")
-                        })
-    except Exception as e:
-        print(f"GitHub Advisories Error: {e}")
-    return vulns
-
-def send_notification(vuln):
-    """發送 Chrome 桌面通知 (透過 ntfy.sh) 與 Email"""
-    title = f"🚨 [{vuln['source']}] 重大漏洞: {vuln['id']} (評分: {vuln['score']})"
-    message = f"{vuln['desc']}\n\n詳細連結: {vuln['url']}"
-    
-    # 1. 發送 ntfy.sh (即時推送到 Chrome 桌面)
-    if NTFY_TOPIC:
-        try:
-            requests.post(
-                f"https://ntfy.sh/{NTFY_TOPIC}",
-                data=message.encode('utf-8'),
-                headers={"Title": title, "Priority": "urgent", "Tags": "rotating_light,security"}
-            )
-        except Exception as e:
-            print(f"Ntfy error: {e}")
-            
-    # 2. 發送 Email
-    if EMAIL_USER and EMAIL_PASS and ALERT_TO:
-        try:
-            msg = MIMEMultipart()
-            msg['From'] = EMAIL_USER
-            msg['To'] = ALERT_TO
-            msg['Subject'] = title
-            html = f"""
-            <h3>{title}</h3>
-            <p><b>來源機構:</b> {vuln['source']}</p>
-            <p><b>威脅評分:</b> {vuln['score']}</p>
-            <p><b>漏洞描述:</b> {vuln['desc']}</p>
-            <p><a href="{vuln['url']}" target="_blank">點擊查看官方詳細修復指引</a></p>
-            """
-            msg.attach(MIMEText(html, 'html'))
-            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-            server.starttls()
-            server.login(EMAIL_USER, EMAIL_PASS)
-            server.sendmail(EMAIL_USER, ALERT_TO, msg.as_string())
-            server.quit()
-        except Exception as e:
-            print(f"Email error: {e}")
-
-if __name__ == "__main__":
-    print("Starting multi-source critical vulnerability scan...")
-    all_vulns = []
-    all_vulns.extend(check_nvd())
-    all_vulns.extend(check_cisa_kev())
-    all_vulns.extend(check_github_advisories())
-    
-    print(f"Found {len(all_vulns)} critical vulnerabilities across sources.")
-    for v in all_vulns:
-        send_notification(v)
+            now = datetime.now
