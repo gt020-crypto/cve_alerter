@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 # 環境變數設定
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC")
 SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
+SMTP_PORT = int(os.environ.get("SMTP_PORT", 465))  # 改用 SSL 常用的 465 Port
 EMAIL_USER = os.environ.get("EMAIL_USER")
 EMAIL_PASS = os.environ.get("EMAIL_PASS")
 ALERT_TO = os.environ.get("ALERT_TO")
@@ -22,14 +22,13 @@ def check_nvd():
         if res.status_code == 200:
             data = res.json()
             now = datetime.now(timezone.utc)
-            cutoff = now - timedelta(hours=6) # 檢查近6小時內發布
+            cutoff = now - timedelta(hours=12) # 檢查近12小時內發布
             for item in data.get("vulnerabilities", []):
                 cve = item.get("cve", {})
                 cve_id = cve.get("id")
                 published = cve.get("published")
                 if published:
                     pub_date = datetime.fromisoformat(published.replace("Z", "+00:00"))
-                    # 確保兩者皆具備時區屬性 (Timezone-aware)
                     if pub_date.tzinfo is None:
                         pub_date = pub_date.replace(tzinfo=timezone.utc)
                         
@@ -62,7 +61,7 @@ def check_cisa_kev():
         if res.status_code == 200:
             data = res.json()
             now = datetime.now(timezone.utc)
-            cutoff = now - timedelta(days=2) # 檢查最近2天
+            cutoff = now - timedelta(days=2)
             for item in data.get("vulnerabilities", []):
                 date_added = item.get("dateAdded")
                 if date_added:
@@ -92,7 +91,7 @@ def check_github_advisories():
         if res.status_code == 200:
             items = res.json()
             now = datetime.now(timezone.utc)
-            cutoff = now - timedelta(hours=6)
+            cutoff = now - timedelta(hours=12)
             for item in items:
                 published = item.get("published_at")
                 if published:
@@ -117,11 +116,10 @@ def check_github_advisories():
 
 def send_notification(vuln):
     """發送 Chrome 桌面通知 (透過 ntfy.sh) 與 Email"""
-    # 標題改用純 ASCII 字母與數字，避免 ntfy 標題編碼錯誤
     title = f"[{vuln['source']}] Critical Vulnerability: {vuln['id']} (Score: {vuln['score']})"
     message = f"🚨 ALERT: {vuln['desc']}\n\nURL: {vuln['url']}"
     
-    # 1. 發送 ntfy.sh (推送至 Chrome 桌面)
+    # 1. 發送 ntfy.sh
     if NTFY_TOPIC:
         try:
             requests.post(
@@ -136,7 +134,7 @@ def send_notification(vuln):
         except Exception as e:
             print(f"Ntfy error: {e}")
             
-    # 2. 發送 Email (優化 Port 587 TLS 處理)
+    # 2. 發送 Email (改用 SMTP_SSL Port 465 穩定發信)
     if EMAIL_USER and EMAIL_PASS and ALERT_TO:
         try:
             msg = MIMEMultipart()
@@ -152,11 +150,8 @@ def send_notification(vuln):
             """
             msg.attach(MIMEText(html, 'html'))
             
-            # 建立 SMTP 連線並加密發送
-            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
+            # 使用 SMTP_SSL 連線至 Port 465
+            server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
             server.login(EMAIL_USER, EMAIL_PASS)
             server.sendmail(EMAIL_USER, ALERT_TO, msg.as_string())
             server.quit()
